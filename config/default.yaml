@@ -8,6 +8,10 @@ data:
     - AAPL
     - VOO
     - QQQ
+  timeframe: 1Hour             # resolución principal de datos (1Hour, 1Day, etc.)
+  lookback_days: 365           # días de historia a pedir a Alpaca
+  extra_timeframes:            # timeframes adicionales para contexto de tendencia
+    - 1Day
 
 risk:
   initial_capital: 10000.0

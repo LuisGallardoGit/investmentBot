@@ -41,6 +41,10 @@ class SignalConfig:
 class DataConfig:
     fixtures_dir: Path = field(default_factory=lambda: Path("data/fixtures"))
     symbols: tuple[str, ...] = ("AAPL", "VOO", "QQQ")
+    # Parámetros de ingesta live (Alpaca)
+    timeframe: str = "1Hour"          # resolución principal de datos
+    lookback_days: int = 365          # días de historia a pedir a Alpaca
+    extra_timeframes: tuple[str, ...] = ()  # timeframes adicionales (ej. "1Day")
 
 
 @dataclass(frozen=True)
@@ -74,9 +78,13 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
     risk_raw = raw.get("risk", {}) or {}
     output_raw = raw.get("output", {}) or {}
 
+    _data_defaults = DataConfig()
     data = DataConfig(
-        fixtures_dir=_coerce_path(data_raw.get("fixtures_dir"), DataConfig().fixtures_dir),
-        symbols=tuple(data_raw.get("symbols") or DataConfig().symbols),
+        fixtures_dir=_coerce_path(data_raw.get("fixtures_dir"), _data_defaults.fixtures_dir),
+        symbols=tuple(data_raw.get("symbols") or _data_defaults.symbols),
+        timeframe=str(data_raw.get("timeframe", _data_defaults.timeframe)),
+        lookback_days=int(data_raw.get("lookback_days", _data_defaults.lookback_days)),
+        extra_timeframes=tuple(data_raw.get("extra_timeframes") or _data_defaults.extra_timeframes),
     )
     signals = SignalConfig(
         fast_ma=int(signals_raw.get("fast_ma", SignalConfig.fast_ma)),

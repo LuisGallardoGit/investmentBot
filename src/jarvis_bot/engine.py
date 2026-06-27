@@ -160,8 +160,27 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
     alpaca_executor = AlpacaExecutor()
     data_ingestor = AlpacaDataIngestor()
 
-    log.info("Obteniendo últimos datos H1 (resolución horaria) desde Alpaca...")
-    raw = data_ingestor.fetch_historical_data(cfg.data.symbols, timeframe="1Hour", limit=250)
+    log.info(
+        "Obteniendo datos %s (lookback=%dd, feed=%s) desde Alpaca...",
+        cfg.data.timeframe,
+        cfg.data.lookback_days,
+        data_ingestor.feed,
+    )
+    raw = data_ingestor.fetch_historical_data(
+        cfg.data.symbols,
+        timeframe=cfg.data.timeframe,
+        lookback_days=cfg.data.lookback_days,
+    )
+
+    # Timeframes adicionales (ej. 1Day para contexto de tendencia) — solo se logean por ahora
+    if cfg.data.extra_timeframes:
+        log.info("Descargando timeframes adicionales: %s", list(cfg.data.extra_timeframes))
+        data_ingestor.fetch_multi_timeframe(
+            cfg.data.symbols,
+            timeframes=list(cfg.data.extra_timeframes),
+            lookback_days=cfg.data.lookback_days,
+        )
+
     enriched = {
         sym: calculate_indicators(
             df,
@@ -170,11 +189,16 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
             rsi_period=cfg.signals.rsi_period,
         )
         for sym, df in raw.items()
+        if not df.empty
     }
 
-    # Alinea por fecha (interseccion). Mantiene reproducibilidad.
+    if not enriched:
+        log.error("Sin datos enriquecidos — verifica las API keys y los símbolos configurados.")
+        return PipelineResult(snapshots=[], trades=[], final_equity=cfg.risk.initial_capital, symbols=list(cfg.data.symbols))
+
+    # Alinea por fecha (intersección). Mantiene reproducibilidad.
     common_dates = sorted(
-        set.intersection(*(set(df["date"].tolist()) for df in enriched.values() if not df.empty))
+        set.intersection(*(set(df["date"].tolist()) for df in enriched.values()))
     )
 
     snapshots: list[PortfolioSnapshot] = []
