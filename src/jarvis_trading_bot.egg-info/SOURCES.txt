@@ -1,8 +1,10 @@
 README.md
 pyproject.toml
 src/jarvis_bot/__init__.py
+src/jarvis_bot/backtester.py
 src/jarvis_bot/config.py
 src/jarvis_bot/engine.py
+src/jarvis_bot/indicators.py
 src/jarvis_bot/logging_setup.py
 src/jarvis_bot/main.py
 src/jarvis_bot/reporting.py
@@ -21,6 +23,11 @@ src/jarvis_bot/modules/restore_full_history.py
 src/jarvis_bot/modules/restore_full_report.py
 src/jarvis_bot/modules/risk_manager.py
 src/jarvis_bot/modules/sentiment.py
+src/jarvis_bot/strategies/__init__.py
+src/jarvis_bot/strategies/base.py
+src/jarvis_bot/strategies/combined.py
+src/jarvis_bot/strategies/mean_reversion.py
+src/jarvis_bot/strategies/trend_follow.py
 src/jarvis_trading_bot.egg-info/._PKG-INFO
 src/jarvis_trading_bot.egg-info/._SOURCES.txt
 src/jarvis_trading_bot.egg-info/._dependency_links.txt
@@ -33,7 +40,11 @@ src/jarvis_trading_bot.egg-info/dependency_links.txt
 src/jarvis_trading_bot.egg-info/entry_points.txt
 src/jarvis_trading_bot.egg-info/requires.txt
 src/jarvis_trading_bot.egg-info/top_level.txt
+tests/test_alpaca_data.py
+tests/test_indicators.py
+tests/test_macro.py
 tests/test_paper_broker.py
 tests/test_risk_manager.py
 tests/test_signals.py
 tests/test_stats_engine.py
+tests/test_strategies.py

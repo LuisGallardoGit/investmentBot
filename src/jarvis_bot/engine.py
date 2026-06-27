@@ -24,11 +24,14 @@ import pandas as pd
 
 from .brokers import Broker, Order, OrderSide, PaperBroker
 from .config import AppConfig
+from .indicators import enrich
+from .modules.alpaca_data import AlpacaDataIngestor
+from .modules.alpaca_executor import AlpacaExecutor
+from .modules.macro import MacroAnalyzer
 from .modules.risk_manager import RiskManager
 from .modules.sentiment import SentimentAnalyzer
-from .modules.macro import MacroAnalyzer
-from .modules.alpaca_executor import AlpacaExecutor
-from .modules.alpaca_data import AlpacaDataIngestor
+from .strategies import get_strategy
+from .strategies.base import Signal
 
 log = logging.getLogger(__name__)
 
@@ -160,6 +163,14 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
     alpaca_executor = AlpacaExecutor()
     data_ingestor = AlpacaDataIngestor()
 
+    # Instancia la estrategia según config
+    strategy = get_strategy(
+        cfg.signals.strategy,
+        rsi_overbought=cfg.signals.rsi_overbought,
+        rsi_oversold=cfg.signals.rsi_oversold,
+    )
+    log.info("Estrategia activa: %s", strategy.name)
+
     log.info(
         "Obteniendo datos %s (lookback=%dd, feed=%s) desde Alpaca...",
         cfg.data.timeframe,
@@ -172,7 +183,7 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
         lookback_days=cfg.data.lookback_days,
     )
 
-    # Timeframes adicionales (ej. 1Day para contexto de tendencia) — solo se logean por ahora
+    # Timeframes adicionales (ej. 1Day para contexto de tendencia)
     if cfg.data.extra_timeframes:
         log.info("Descargando timeframes adicionales: %s", list(cfg.data.extra_timeframes))
         data_ingestor.fetch_multi_timeframe(
@@ -182,10 +193,10 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
         )
 
     enriched = {
-        sym: calculate_indicators(
+        sym: enrich(
             df,
-            fast=cfg.signals.fast_ma,
-            slow=cfg.signals.slow_ma,
+            fast_ema=cfg.signals.fast_ma,
+            slow_ema=cfg.signals.slow_ma,
             rsi_period=cfg.signals.rsi_period,
         )
         for sym, df in raw.items()
@@ -207,10 +218,9 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
 
     indexed = {sym: df.set_index("date") for sym, df in enriched.items() if not df.empty}
 
-
     for i, date in enumerate(common_dates):
         if i == 0:
-            continue  # necesitamos previa para detectar cruces
+            continue  # necesitamos fila previa para señales
 
         prev_date = common_dates[i - 1]
         prices_today = {sym: float(indexed[sym].loc[date, "close"]) for sym in indexed}
@@ -220,26 +230,22 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
         equity_curve.append(equity)
         drawdown_locked = risk.drawdown_breach(equity_curve)
 
-        # En backtest llamariamos un mock historico, pero para paper trading simularemos o llamaremos a la API real
-        # Optimizacion: Para no agotar API limits por cada bar, simulamos el score basado en mock salvo el ultimo dia
+        # Sentimiento y macro solo en la última barra (evita agotar API limits en cada bar)
         is_latest_bar = (i == len(common_dates) - 1)
         if is_latest_bar and cfg.is_paper():
-            # fetch current real sentiment for forward testing execution
             global_sentiment = sentiment_analyzer.fetch_news_sentiment(list(indexed.keys()))
             macro_state = macro_analyzer.fetch_macro_state()
         else:
-            global_sentiment = 0.5  # Neutral para las fechas pasadas del backtest inicial
+            global_sentiment = 0.5
             macro_state = "normal"
 
         for sym, df in indexed.items():
             row_prev = df.loc[prev_date]
             row = df.loc[date]
-            signal = generate_signal(
-                row_prev, row, cfg.signals.rsi_overbought, cfg.signals.rsi_oversold, global_sentiment, macro_state
-            )
+            sig = strategy.signal(row_prev, row, global_sentiment, macro_state)
             price = float(row["close"])
 
-            if signal == "BUY" and not drawdown_locked:
+            if sig == Signal.BUY and not drawdown_locked:
                 if sym in broker.positions():
                     continue  # ya largo: no piramidamos en el MVP
                 sizing = risk.position_size(equity=equity, price=price)
@@ -257,13 +263,13 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
                         reference_price=price,
                     )
                 )
-                trades.append(_trade_dict(fill, signal, equity))
-                
-                # Ejecución en Broker Real (Alpaca) si es el último día (operación actual)
+                trades.append(_trade_dict(fill, sig.value, equity))
+
+                # Ejecución en Broker Real (Alpaca) solo en la última barra
                 if is_latest_bar and cfg.is_paper():
                     alpaca_executor.submit_order(sym, "buy", qty)
 
-            elif signal == "SELL":
+            elif sig == Signal.SELL:
                 qty = broker.positions().get(sym, 0.0)
                 if qty <= 0:
                     continue
@@ -276,9 +282,9 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
                         reference_price=price,
                     )
                 )
-                trades.append(_trade_dict(fill, signal, equity))
-                
-                # Ejecución en Broker Real (Alpaca) si es el último día (operación actual)
+                trades.append(_trade_dict(fill, sig.value, equity))
+
+                # Ejecución en Broker Real (Alpaca) solo en la última barra
                 if is_latest_bar and cfg.is_paper():
                     alpaca_executor.submit_order(sym, "sell", qty)
 

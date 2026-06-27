@@ -35,6 +35,7 @@ class SignalConfig:
     rsi_period: int = 14
     rsi_overbought: float = 70.0
     rsi_oversold: float = 30.0
+    strategy: str = "combined"   # trend_follow | mean_reversion | combined
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
         rsi_period=int(signals_raw.get("rsi_period", SignalConfig.rsi_period)),
         rsi_overbought=float(signals_raw.get("rsi_overbought", SignalConfig.rsi_overbought)),
         rsi_oversold=float(signals_raw.get("rsi_oversold", SignalConfig.rsi_oversold)),
+        strategy=str(signals_raw.get("strategy", SignalConfig.strategy)),
     )
     risk = RiskConfig(
         initial_capital=float(risk_raw.get("initial_capital", RiskConfig.initial_capital)),

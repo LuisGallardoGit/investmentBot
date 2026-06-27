@@ -22,6 +22,7 @@ risk:
   max_position_pct: 0.25      # max 25% del equity en un solo símbolo
 
 signals:
+  strategy: combined          # trend_follow | mean_reversion | combined
   fast_ma: 9                  # EMA rápida (periodos)
   slow_ma: 21                 # EMA lenta (periodos)
   rsi_period: 14              # periodos para cálculo RSI
