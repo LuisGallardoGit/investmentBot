@@ -31,10 +31,11 @@ from .brokers import Broker, Order, OrderSide, PaperBroker
 from .config import AppConfig
 from .indicators import enrich
 from .modules.alpaca_data import AlpacaDataIngestor
-from .modules.alpaca_executor import AlpacaExecutor
+from .modules.alpaca_executor import AlpacaExecutor, BracketConfig
 from .modules.fx_risk import FXRiskManager
 from .modules.macro import MacroAnalyzer
 from .modules.market_hours import is_market_open, market_status
+from .modules.position_reconciler import PositionReconciler
 from .modules.risk_manager import RiskManager
 from .modules.sentiment import SentimentAnalyzer
 from .strategies import get_strategy
@@ -184,8 +185,26 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
     )
     sentiment_analyzer = SentimentAnalyzer(api_key=os.getenv("ALPHA_VANTAGE_API_KEY"))
     macro_analyzer = MacroAnalyzer(api_key=os.getenv("FRED_API_KEY"))
-    alpaca_executor = AlpacaExecutor()
+
+    # Executor con bracket orders (stop-loss + take-profit automáticos)
+    bracket = BracketConfig(
+        stop_loss_pct=cfg.risk.stop_loss_pct,
+        take_profit_pct=cfg.risk.take_profit_pct,
+    )
+    alpaca_executor = AlpacaExecutor(bracket=bracket)
+
+    # Reconciliador de posiciones (detecta drift entre estado local y Alpaca)
+    reconciler = PositionReconciler(executor=alpaca_executor)
+
     data_ingestor = AlpacaDataIngestor()
+
+    # Reconciliar posiciones al inicio (restaura estado si el bot se reinició)
+    if alpaca_executor.is_configured():
+        remote_positions = reconciler.positions_from_alpaca()
+        if remote_positions and isinstance(broker, PaperBroker):
+            log.info("Restaurando %d posiciones desde Alpaca.", len(remote_positions))
+            for sym, qty in remote_positions.items():
+                broker._positions[sym] = qty  # type: ignore[attr-defined]
 
     # FX Risk Manager (contexto Colombia)
     fx_risk = FXRiskManager(
@@ -323,7 +342,13 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
 
                 # Ejecución en Broker Real (Alpaca) solo en la última barra y si mercado abierto
                 if is_latest_bar and cfg.is_paper() and is_market_open():
-                    alpaca_executor.submit_order(sym, "buy", qty)
+                    fill_result = alpaca_executor.submit_order(
+                        sym, "buy", qty, ref_price=price, use_bracket=True
+                    )
+                    if fill_result and fill_result.is_filled:
+                        log.info("Fill real Alpaca: %s", fill_result)
+                        trade["alpaca_fill_price"] = fill_result.avg_fill_price
+                        trade["alpaca_order_id"] = fill_result.order_id
 
             elif sig == Signal.SELL:
                 qty = broker.positions().get(sym, 0.0)
@@ -358,7 +383,11 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
 
                 # Ejecución en Broker Real (Alpaca) solo en la última barra y si mercado abierto
                 if is_latest_bar and cfg.is_paper() and is_market_open():
-                    alpaca_executor.submit_order(sym, "sell", qty)
+                    fill_result = alpaca_executor.submit_order(sym, "sell", qty, use_bracket=False)
+                    if fill_result and fill_result.is_filled:
+                        log.info("Fill real Alpaca: %s", fill_result)
+                        trade["alpaca_fill_price"] = fill_result.avg_fill_price
+                        trade["alpaca_order_id"] = fill_result.order_id
 
         cash, positions_value = _portfolio_value(broker, prices_today)
         cop_equity = fx_risk.portfolio_value_cop(cash + positions_value) if current_usd_cop else None
@@ -375,6 +404,11 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
 
     final_equity = snapshots[-1].equity if snapshots else cfg.risk.initial_capital
     final_fx_summary = fx_risk.fx_summary(final_equity)
+
+    # Reconciliación final: verifica que el estado local coincide con Alpaca
+    if alpaca_executor.is_configured():
+        reconciler.reconcile(broker.positions())
+
     log.info(
         "Pipeline completo: %d snapshots, %d trades, equity=%.2f USD%s",
         len(snapshots),
@@ -401,8 +435,12 @@ def _trade_dict(fill, signal: str, equity_pre: float) -> dict:
         "signal": signal,
         "equity_pre_trade": equity_pre,
         "commission": fill.commission,
+        # FX (Fase 3)
         "usd_cop_entry": None,
         "usd_cop_exit": None,
         "pnl_cop_approx": None,
         "fx_impact_cop": None,
+        # Alpaca live fill (Fase 4)
+        "alpaca_fill_price": None,
+        "alpaca_order_id": None,
     }
