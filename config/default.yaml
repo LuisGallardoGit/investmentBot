@@ -45,6 +45,14 @@ ml:
   forward_horizon: 5               # Barras forward para calcular el target
   target_threshold_pct: 1.0       # % mínimo de movimiento para clasificar BUY/SELL
 
+market_regime:
+  enabled: true
+  vix_calm_threshold: 20.0       # VIX < 20 → sin restricción (×1.00)
+  vix_elevated_threshold: 25.0   # VIX 20-25 → reducir al 75% (×0.75)
+  vix_extreme_threshold: 35.0    # VIX > 35 → bloquear entradas (×0.00)
+  wti_caution_pct: -10.0         # WTI cae >10% en 30d → ×0.75 (predictor de COP débil)
+  wti_warning_pct: -20.0         # WTI cae >20% en 30d → ×0.50
+
 output:
   state_path: data/portfolio_state.csv
   history_path: data/history.csv

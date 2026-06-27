@@ -73,6 +73,18 @@ class MLConfig:
 
 
 @dataclass(frozen=True)
+class MarketRegimeConfig:
+    """Configuración del análisis de régimen de mercado (VIX + WTI)."""
+
+    enabled: bool = True
+    vix_calm_threshold: float = 20.0      # VIX < este valor → sin restricción
+    vix_elevated_threshold: float = 25.0  # VIX 20-25 → reducir al 75%
+    vix_extreme_threshold: float = 35.0   # VIX > este valor → bloquear
+    wti_caution_pct: float = -10.0        # WTI -10% en 30d → reducir al 75%
+    wti_warning_pct: float = -20.0        # WTI -20% en 30d → reducir al 50%
+
+
+@dataclass(frozen=True)
 class OutputConfig:
     state_path: Path = field(default_factory=lambda: Path("data/portfolio_state.csv"))
     history_path: Path = field(default_factory=lambda: Path("data/history.csv"))
@@ -89,6 +101,7 @@ class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     colombia: ColombiaConfig = field(default_factory=ColombiaConfig)
     ml: MLConfig = field(default_factory=MLConfig)
+    market_regime: MarketRegimeConfig = field(default_factory=MarketRegimeConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     def is_paper(self) -> bool:
@@ -146,6 +159,16 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
         ),
         timezone=str(colombia_raw.get("timezone", _co_defaults.timezone)),
     )
+    regime_raw = raw.get("market_regime", {}) or {}
+    _regime_defaults = MarketRegimeConfig()
+    market_regime = MarketRegimeConfig(
+        enabled=bool(regime_raw.get("enabled", _regime_defaults.enabled)),
+        vix_calm_threshold=float(regime_raw.get("vix_calm_threshold", _regime_defaults.vix_calm_threshold)),
+        vix_elevated_threshold=float(regime_raw.get("vix_elevated_threshold", _regime_defaults.vix_elevated_threshold)),
+        vix_extreme_threshold=float(regime_raw.get("vix_extreme_threshold", _regime_defaults.vix_extreme_threshold)),
+        wti_caution_pct=float(regime_raw.get("wti_caution_pct", _regime_defaults.wti_caution_pct)),
+        wti_warning_pct=float(regime_raw.get("wti_warning_pct", _regime_defaults.wti_warning_pct)),
+    )
     ml_raw = raw.get("ml", {}) or {}
     _ml_defaults = MLConfig()
     ml = MLConfig(
@@ -175,6 +198,7 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
         risk=risk,
         colombia=colombia,
         ml=ml,
+        market_regime=market_regime,
         output=output,
     )
 

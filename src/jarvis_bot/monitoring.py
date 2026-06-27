@@ -190,9 +190,62 @@ class HealthCheck:
         except requests.RequestException as exc:
             return ServiceStatus("Telegram", ok=False, message=f"Error de red: {exc}")
 
+    def check_market_regime(self) -> ServiceStatus:
+        """Verifica VIX y WTI desde FRED e informa el régimen actual."""
+        if not self.fred_key:
+            return ServiceStatus("Régimen (VIX/WTI)", ok=False, message="FRED_API_KEY no configurada")
+
+        fred_base = "https://api.stlouisfed.org/fred/series/observations"
+
+        def _get(series: str) -> float | None:
+            params = {
+                "series_id": series,
+                "api_key": self.fred_key,
+                "file_type": "json",
+                "sort_order": "desc",
+                "limit": "5",
+            }
+            try:
+                resp = requests.get(fred_base, params=params, timeout=HEALTH_CHECK_TIMEOUT_S)
+                resp.raise_for_status()
+                for obs in resp.json().get("observations", []):
+                    if obs.get("value", ".") != ".":
+                        return float(obs["value"])
+            except Exception:
+                pass
+            return None
+
+        try:
+            t0 = datetime.utcnow()
+            vix = _get("VIXCLS")
+            wti = _get("DCOILWTICO")
+            latency = (datetime.utcnow() - t0).total_seconds() * 1000
+
+            parts = []
+            if vix is not None:
+                regime = "calm" if vix < 20 else ("elevated" if vix < 25 else ("high" if vix < 35 else "EXTREME"))
+                parts.append(f"VIX={vix:.1f} [{regime}]")
+            else:
+                parts.append("VIX=N/A")
+            if wti is not None:
+                parts.append(f"WTI=${wti:.1f}/bbl")
+            else:
+                parts.append("WTI=N/A")
+
+            ok = vix is not None or wti is not None
+            msg = "OK — " + " · ".join(parts) if ok else "Sin datos de VIX ni WTI"
+            return ServiceStatus("Régimen (VIX/WTI)", ok=ok, message=msg, latency_ms=latency)
+        except Exception as exc:
+            return ServiceStatus("Régimen (VIX/WTI)", ok=False, message=f"Error: {exc}")
+
     def run_all(self) -> HealthReport:
         """Ejecuta todos los health checks y retorna un HealthReport."""
-        checks = [self.check_alpaca(), self.check_fred(), self.check_telegram()]
+        checks = [
+            self.check_alpaca(),
+            self.check_fred(),
+            self.check_telegram(),
+            self.check_market_regime(),
+        ]
         report = HealthReport(services=checks)
         if report.all_ok:
             log.info("Health check: todos los servicios OK (%d/%d)", report.n_ok, len(checks))

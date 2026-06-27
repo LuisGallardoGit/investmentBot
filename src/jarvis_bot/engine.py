@@ -35,6 +35,7 @@ from .modules.alpaca_data import AlpacaDataIngestor
 from .modules.alpaca_executor import AlpacaExecutor, BracketConfig
 from .modules.fx_risk import FXRiskManager
 from .modules.macro import MacroAnalyzer
+from .modules.market_regime import MarketRegimeAnalyzer
 from .modules.market_hours import is_market_open, market_status
 from .modules.position_reconciler import PositionReconciler
 from .modules.risk_manager import RiskManager
@@ -203,6 +204,15 @@ def run_pipeline(
     )
     sentiment_analyzer = SentimentAnalyzer(api_key=os.getenv("ALPHA_VANTAGE_API_KEY"))
     macro_analyzer = MacroAnalyzer(api_key=os.getenv("FRED_API_KEY"))
+    regime_analyzer = MarketRegimeAnalyzer(
+        api_key=os.getenv("FRED_API_KEY"),
+        enabled=cfg.market_regime.enabled,
+        vix_calm=cfg.market_regime.vix_calm_threshold,
+        vix_elevated=cfg.market_regime.vix_elevated_threshold,
+        vix_extreme=cfg.market_regime.vix_extreme_threshold,
+        wti_caution_pct=cfg.market_regime.wti_caution_pct,
+        wti_warning_pct=cfg.market_regime.wti_warning_pct,
+    )
 
     # Executor con bracket orders (stop-loss + take-profit automáticos)
     bracket = BracketConfig(
@@ -294,6 +304,9 @@ def run_pipeline(
     # Estado FX inicial (se actualiza en la última barra con datos reales)
     fx_state = None
     current_usd_cop: float | None = None
+    # Régimen de mercado inicial (neutro — se actualiza en la última barra)
+    from .modules.market_regime import MarketRegime as _MarketRegime
+    current_regime = _MarketRegime()
 
     for i, date in enumerate(common_dates):
         if i == 0:
@@ -321,6 +334,9 @@ def run_pipeline(
             macro_full = macro_analyzer.fetch_full_state()
             macro_state = macro_full.risk_level if hasattr(macro_full, "risk_level") else macro_analyzer.fetch_macro_state()
 
+            # Régimen de mercado (VIX + WTI) — una sola consulta por ejecución
+            current_regime = regime_analyzer.fetch_regime()
+
             # Actualizar FX state con datos reales
             if cfg.colombia.apply_fx_risk and hasattr(macro_full, "usd_cop") and macro_full.usd_cop:
                 current_usd_cop = macro_full.usd_cop
@@ -340,22 +356,30 @@ def run_pipeline(
         fx_multiplier = fx_risk.position_size_multiplier(fx_state) if fx_state else 1.0
         fx_allows_entry = fx_risk.allows_new_entry(fx_state) if fx_state else True
 
+        # Multiplicador de régimen (VIX + WTI) — se combina con FX
+        regime_multiplier = current_regime.position_multiplier
+        regime_allows_entry = not current_regime.blocks_new_entries
+
         for sym, df in indexed.items():
             row_prev = df.loc[prev_date]
             row = df.loc[date]
             sig = strategy.signal(row_prev, row, global_sentiment, macro_state)
             price = float(row["close"])
 
-            if sig == Signal.BUY and not drawdown_locked and fx_allows_entry:
+            if sig == Signal.BUY and not drawdown_locked and fx_allows_entry and regime_allows_entry:
                 if sym in broker.positions():
                     continue  # ya largo: no piramidamos en el MVP
                 sizing = risk.position_size(equity=equity, price=price)
                 if not sizing.approved:
                     continue
-                # Aplicar multiplicador FX al tamaño de posición
-                qty = max(0, int(sizing.quantity * fx_multiplier))
+                # Aplicar multiplicador combinado: FX × Régimen (VIX + WTI)
+                total_multiplier = fx_multiplier * regime_multiplier
+                qty = max(0, int(sizing.quantity * total_multiplier))
                 if qty <= 0:
-                    log.info("FX cautela: posición para %s reducida a 0 — omitida.", sym)
+                    log.info(
+                        "Posición para %s reducida a 0 (FX×%.2f, Régimen×%.2f) — omitida.",
+                        sym, fx_multiplier, regime_multiplier,
+                    )
                     continue
                 if qty * price > broker.cash():
                     continue
