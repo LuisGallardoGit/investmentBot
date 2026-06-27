@@ -2,10 +2,15 @@
 
 Flujo:
     load_historical_data
-      -> calculate_indicators
-      -> generate_signals
-      -> apply_risk_manager + simulate_order via PaperBroker
+      -> calculate_indicators (enrich)
+      -> generate_signals (strategy pattern)
+      -> apply_risk_manager + FXRiskManager + simulate_order via PaperBroker
       -> persist portfolio snapshots + history
+
+Contexto Colombia:
+  - FXRiskManager ajusta el tamaño de posición según volatilidad COP/USD
+  - market_hours guard previene operar fuera del horario NYSE
+  - PnL se registra en USD y COP para reporting
 
 Cada bar genera como mucho una operacion por simbolo (long-only en el MVP).
 """
@@ -27,7 +32,9 @@ from .config import AppConfig
 from .indicators import enrich
 from .modules.alpaca_data import AlpacaDataIngestor
 from .modules.alpaca_executor import AlpacaExecutor
+from .modules.fx_risk import FXRiskManager
 from .modules.macro import MacroAnalyzer
+from .modules.market_hours import is_market_open, market_status
 from .modules.risk_manager import RiskManager
 from .modules.sentiment import SentimentAnalyzer
 from .strategies import get_strategy
@@ -130,6 +137,7 @@ class PortfolioSnapshot:
     positions_value: float
     equity: float
     positions: dict[str, float] = field(default_factory=dict)
+    cop_equity: float | None = None       # Valor del portafolio en COP (si FX disponible)
 
 
 @dataclass
@@ -138,6 +146,7 @@ class PipelineResult:
     trades: list[dict]
     final_equity: float
     symbols: list[str]
+    fx_summary: dict = field(default_factory=dict)   # Resumen FX al final del pipeline
 
 
 def _portfolio_value(broker: Broker, prices: dict[str, float]) -> tuple[float, float]:
@@ -149,6 +158,21 @@ def _portfolio_value(broker: Broker, prices: dict[str, float]) -> tuple[float, f
 def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult:
     if not cfg.is_paper():
         raise RuntimeError("run_pipeline solo se ejecuta en modo paper.")
+
+    # -- Guard de horario de mercado (Colombia context) --
+    if cfg.colombia.check_market_hours and not is_market_open():
+        status = market_status()
+        log.warning(
+            "Mercado cerrado (sesión: '%s'). "
+            "Hora ET: %s / Bogotá: %s. "
+            "Próxima apertura: %s (%s Bogotá). "
+            "El pipeline continuará en modo histórico sin enviar órdenes.",
+            status["session"],
+            status["et_time"],
+            status["bogota_time"],
+            status["next_open_et"],
+            status["next_open_bogota"],
+        )
 
     broker = broker or PaperBroker(starting_cash=cfg.risk.initial_capital)
     risk = RiskManager(
@@ -162,6 +186,12 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
     macro_analyzer = MacroAnalyzer(api_key=os.getenv("FRED_API_KEY"))
     alpaca_executor = AlpacaExecutor()
     data_ingestor = AlpacaDataIngestor()
+
+    # FX Risk Manager (contexto Colombia)
+    fx_risk = FXRiskManager(
+        fx_vol_caution_pct=cfg.colombia.fx_vol_caution_pct,
+        fx_vol_block_pct=cfg.colombia.fx_vol_block_pct,
+    )
 
     # Instancia la estrategia según config
     strategy = get_strategy(
@@ -218,6 +248,10 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
 
     indexed = {sym: df.set_index("date") for sym, df in enriched.items() if not df.empty}
 
+    # Estado FX inicial (se actualiza en la última barra con datos reales)
+    fx_state = None
+    current_usd_cop: float | None = None
+
     for i, date in enumerate(common_dates):
         if i == 0:
             continue  # necesitamos fila previa para señales
@@ -230,14 +264,26 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
         equity_curve.append(equity)
         drawdown_locked = risk.drawdown_breach(equity_curve)
 
-        # Sentimiento y macro solo en la última barra (evita agotar API limits en cada bar)
+        # Sentimiento, macro y FX solo en la última barra (evita agotar API limits)
         is_latest_bar = (i == len(common_dates) - 1)
         if is_latest_bar and cfg.is_paper():
             global_sentiment = sentiment_analyzer.fetch_news_sentiment(list(indexed.keys()))
-            macro_state = macro_analyzer.fetch_macro_state()
+            macro_full = macro_analyzer.fetch_full_state()
+            macro_state = macro_full.risk_level if hasattr(macro_full, "risk_level") else macro_analyzer.fetch_macro_state()
+
+            # Actualizar FX state con datos reales
+            if cfg.colombia.apply_fx_risk and hasattr(macro_full, "usd_cop") and macro_full.usd_cop:
+                current_usd_cop = macro_full.usd_cop
+                change_pct = macro_full.usd_cop_30d_change_pct or 0.0
+                fx_state = fx_risk.evaluate(current_usd_cop, change_pct)
+                log.info("FX Colombia: %s", fx_state)
         else:
             global_sentiment = 0.5
             macro_state = "normal"
+
+        # Calcular multiplicador FX para ajustar tamaño de posición
+        fx_multiplier = fx_risk.position_size_multiplier(fx_state) if fx_state else 1.0
+        fx_allows_entry = fx_risk.allows_new_entry(fx_state) if fx_state else True
 
         for sym, df in indexed.items():
             row_prev = df.loc[prev_date]
@@ -245,13 +291,17 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
             sig = strategy.signal(row_prev, row, global_sentiment, macro_state)
             price = float(row["close"])
 
-            if sig == Signal.BUY and not drawdown_locked:
+            if sig == Signal.BUY and not drawdown_locked and fx_allows_entry:
                 if sym in broker.positions():
                     continue  # ya largo: no piramidamos en el MVP
                 sizing = risk.position_size(equity=equity, price=price)
                 if not sizing.approved:
                     continue
-                qty = sizing.quantity
+                # Aplicar multiplicador FX al tamaño de posición
+                qty = max(0, int(sizing.quantity * fx_multiplier))
+                if qty <= 0:
+                    log.info("FX cautela: posición para %s reducida a 0 — omitida.", sym)
+                    continue
                 if qty * price > broker.cash():
                     continue
                 fill = broker.submit(
@@ -263,10 +313,16 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
                         reference_price=price,
                     )
                 )
-                trades.append(_trade_dict(fill, sig.value, equity))
+                # Registrar tasa FX de entrada para calcular PnL en COP después
+                if current_usd_cop:
+                    fx_risk.record_entry(sym, current_usd_cop)
 
-                # Ejecución en Broker Real (Alpaca) solo en la última barra
-                if is_latest_bar and cfg.is_paper():
+                trade = _trade_dict(fill, sig.value, equity)
+                trade["usd_cop_entry"] = current_usd_cop
+                trades.append(trade)
+
+                # Ejecución en Broker Real (Alpaca) solo en la última barra y si mercado abierto
+                if is_latest_bar and cfg.is_paper() and is_market_open():
                     alpaca_executor.submit_order(sym, "buy", qty)
 
             elif sig == Signal.SELL:
@@ -282,13 +338,30 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
                         reference_price=price,
                     )
                 )
-                trades.append(_trade_dict(fill, sig.value, equity))
+                # Calcular PnL ajustado por FX en COP
+                pnl_usd = fill.price * fill.quantity - (
+                    fx_risk.entry_rate(sym) * 0 if not current_usd_cop else 0
+                )
+                trade = _trade_dict(fill, sig.value, equity)
+                trade["usd_cop_exit"] = current_usd_cop
+                if current_usd_cop and fx_risk.entry_rate(sym):
+                    pnl_adj = fx_risk.adjusted_pnl(
+                        sym,
+                        pnl_usd=fill.price * fill.quantity,  # bruto, proxy
+                        position_usd=fill.price * fill.quantity,
+                        current_usd_cop=current_usd_cop,
+                    )
+                    trade["pnl_cop_approx"] = round(pnl_adj.pnl_cop, 0)
+                    trade["fx_impact_cop"] = round(pnl_adj.fx_impact_cop, 0)
+                fx_risk.record_exit(sym)
+                trades.append(trade)
 
-                # Ejecución en Broker Real (Alpaca) solo en la última barra
-                if is_latest_bar and cfg.is_paper():
+                # Ejecución en Broker Real (Alpaca) solo en la última barra y si mercado abierto
+                if is_latest_bar and cfg.is_paper() and is_market_open():
                     alpaca_executor.submit_order(sym, "sell", qty)
 
         cash, positions_value = _portfolio_value(broker, prices_today)
+        cop_equity = fx_risk.portfolio_value_cop(cash + positions_value) if current_usd_cop else None
         snapshots.append(
             PortfolioSnapshot(
                 timestamp=date.to_pydatetime() if hasattr(date, "to_pydatetime") else date,
@@ -296,21 +369,25 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
                 positions_value=positions_value,
                 equity=cash + positions_value,
                 positions=broker.positions(),
+                cop_equity=cop_equity,
             )
         )
 
     final_equity = snapshots[-1].equity if snapshots else cfg.risk.initial_capital
+    final_fx_summary = fx_risk.fx_summary(final_equity)
     log.info(
-        "Pipeline completo: %d snapshots, %d trades, equity final=%.2f",
+        "Pipeline completo: %d snapshots, %d trades, equity=%.2f USD%s",
         len(snapshots),
         len(trades),
         final_equity,
+        f" / {final_fx_summary.get('cop_value', 0):,.0f} COP" if final_fx_summary.get("cop_value") else "",
     )
     return PipelineResult(
         snapshots=snapshots,
         trades=trades,
         final_equity=final_equity,
         symbols=list(cfg.data.symbols),
+        fx_summary=final_fx_summary,
     )
 
 
@@ -324,4 +401,8 @@ def _trade_dict(fill, signal: str, equity_pre: float) -> dict:
         "signal": signal,
         "equity_pre_trade": equity_pre,
         "commission": fill.commission,
+        "usd_cop_entry": None,
+        "usd_cop_exit": None,
+        "pnl_cop_approx": None,
+        "fx_impact_cop": None,
     }

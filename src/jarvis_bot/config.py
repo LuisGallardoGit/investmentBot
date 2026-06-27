@@ -49,6 +49,17 @@ class DataConfig:
 
 
 @dataclass(frozen=True)
+class ColombiaConfig:
+    """Configuración para el contexto de inversión desde Colombia."""
+
+    apply_fx_risk: bool = True            # Activar módulo de riesgo FX COP/USD
+    fx_vol_caution_pct: float = 5.0      # % cambio 30d que activa cautela (reducir posición)
+    fx_vol_block_pct: float = 10.0       # % cambio 30d que bloquea nuevas entradas
+    check_market_hours: bool = True       # Guard: no operar fuera de horario NYSE
+    timezone: str = "America/Bogota"     # Zona horaria del usuario
+
+
+@dataclass(frozen=True)
 class OutputConfig:
     state_path: Path = field(default_factory=lambda: Path("data/portfolio_state.csv"))
     history_path: Path = field(default_factory=lambda: Path("data/history.csv"))
@@ -63,6 +74,7 @@ class AppConfig:
     data: DataConfig = field(default_factory=DataConfig)
     signals: SignalConfig = field(default_factory=SignalConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    colombia: ColombiaConfig = field(default_factory=ColombiaConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     def is_paper(self) -> bool:
@@ -77,6 +89,7 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
     data_raw = raw.get("data", {}) or {}
     signals_raw = raw.get("signals", {}) or {}
     risk_raw = raw.get("risk", {}) or {}
+    colombia_raw = raw.get("colombia", {}) or {}
     output_raw = raw.get("output", {}) or {}
 
     _data_defaults = DataConfig()
@@ -105,6 +118,20 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
         ),
         max_position_pct=float(risk_raw.get("max_position_pct", RiskConfig.max_position_pct)),
     )
+    _co_defaults = ColombiaConfig()
+    colombia = ColombiaConfig(
+        apply_fx_risk=bool(colombia_raw.get("apply_fx_risk", _co_defaults.apply_fx_risk)),
+        fx_vol_caution_pct=float(
+            colombia_raw.get("fx_vol_caution_pct", _co_defaults.fx_vol_caution_pct)
+        ),
+        fx_vol_block_pct=float(
+            colombia_raw.get("fx_vol_block_pct", _co_defaults.fx_vol_block_pct)
+        ),
+        check_market_hours=bool(
+            colombia_raw.get("check_market_hours", _co_defaults.check_market_hours)
+        ),
+        timezone=str(colombia_raw.get("timezone", _co_defaults.timezone)),
+    )
     output = OutputConfig(
         state_path=_coerce_path(output_raw.get("state_path"), OutputConfig().state_path),
         history_path=_coerce_path(output_raw.get("history_path"), OutputConfig().history_path),
@@ -117,6 +144,7 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
         data=data,
         signals=signals,
         risk=risk,
+        colombia=colombia,
         output=output,
     )
 

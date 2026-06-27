@@ -29,6 +29,13 @@ signals:
   rsi_overbought: 70.0        # RSI por encima = sobrecomprado (filtro SELL)
   rsi_oversold: 30.0          # RSI por debajo = sobrevendido (refuerzo BUY)
 
+colombia:
+  apply_fx_risk: true            # Activar módulo de riesgo FX COP/USD
+  fx_vol_caution_pct: 5.0       # % cambio 30d que activa modo cautela (reducir posición a 50%)
+  fx_vol_block_pct: 10.0        # % cambio 30d que bloquea nuevas entradas
+  check_market_hours: true       # Guard: no operar fuera de horario NYSE
+  timezone: America/Bogota       # Zona horaria del usuario
+
 output:
   state_path: data/portfolio_state.csv
   history_path: data/history.csv
