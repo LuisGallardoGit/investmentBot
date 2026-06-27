@@ -2,6 +2,7 @@ from .base import Signal, Strategy
 from .trend_follow import TrendFollowStrategy
 from .mean_reversion import MeanReversionStrategy
 from .combined import CombinedStrategy
+from .ml_strategy import MLStrategy
 
 __all__ = [
     "Signal",
@@ -9,6 +10,7 @@ __all__ = [
     "TrendFollowStrategy",
     "MeanReversionStrategy",
     "CombinedStrategy",
+    "MLStrategy",
 ]
 
 
@@ -18,6 +20,7 @@ def get_strategy(name: str, **kwargs) -> Strategy:
         "trend_follow": TrendFollowStrategy,
         "mean_reversion": MeanReversionStrategy,
         "combined": CombinedStrategy,
+        "ml": MLStrategy,
     }
     if name not in strategies:
         raise ValueError(

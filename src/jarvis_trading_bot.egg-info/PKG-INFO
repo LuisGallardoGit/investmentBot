@@ -16,6 +16,9 @@ Requires-Dist: alpaca-py>=0.13
 Provides-Extra: dev
 Requires-Dist: pytest>=7.4; extra == "dev"
 Requires-Dist: pytest-cov>=4.1; extra == "dev"
+Provides-Extra: ml
+Requires-Dist: scikit-learn>=1.3; extra == "ml"
+Requires-Dist: joblib>=1.3; extra == "ml"
 Provides-Extra: scripts
 Requires-Dist: yfinance>=0.2; extra == "scripts"
 

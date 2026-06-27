@@ -60,6 +60,19 @@ class ColombiaConfig:
 
 
 @dataclass(frozen=True)
+class MLConfig:
+    """Configuración del módulo de Machine Learning (Fase 6)."""
+
+    enabled: bool = False               # Activar estrategia ML en el pipeline
+    model_path: str = "models/signal_classifier.pkl"  # Ruta del modelo entrenado
+    confidence_threshold: float = 0.45  # Umbral mínimo de confianza para BUY/SELL
+    n_splits: int = 3                   # Splits para walk-forward training
+    train_pct: float = 0.70             # % de cada split usado para entrenamiento
+    forward_horizon: int = 5            # Barras hacia adelante para el target
+    target_threshold_pct: float = 1.0  # % mínimo de movimiento para BUY/SELL target
+
+
+@dataclass(frozen=True)
 class OutputConfig:
     state_path: Path = field(default_factory=lambda: Path("data/portfolio_state.csv"))
     history_path: Path = field(default_factory=lambda: Path("data/history.csv"))
@@ -75,6 +88,7 @@ class AppConfig:
     signals: SignalConfig = field(default_factory=SignalConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     colombia: ColombiaConfig = field(default_factory=ColombiaConfig)
+    ml: MLConfig = field(default_factory=MLConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     def is_paper(self) -> bool:
@@ -132,6 +146,21 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
         ),
         timezone=str(colombia_raw.get("timezone", _co_defaults.timezone)),
     )
+    ml_raw = raw.get("ml", {}) or {}
+    _ml_defaults = MLConfig()
+    ml = MLConfig(
+        enabled=bool(ml_raw.get("enabled", _ml_defaults.enabled)),
+        model_path=str(ml_raw.get("model_path", _ml_defaults.model_path)),
+        confidence_threshold=float(
+            ml_raw.get("confidence_threshold", _ml_defaults.confidence_threshold)
+        ),
+        n_splits=int(ml_raw.get("n_splits", _ml_defaults.n_splits)),
+        train_pct=float(ml_raw.get("train_pct", _ml_defaults.train_pct)),
+        forward_horizon=int(ml_raw.get("forward_horizon", _ml_defaults.forward_horizon)),
+        target_threshold_pct=float(
+            ml_raw.get("target_threshold_pct", _ml_defaults.target_threshold_pct)
+        ),
+    )
     output = OutputConfig(
         state_path=_coerce_path(output_raw.get("state_path"), OutputConfig().state_path),
         history_path=_coerce_path(output_raw.get("history_path"), OutputConfig().history_path),
@@ -145,6 +174,7 @@ def _build_config(raw: Mapping[str, Any]) -> AppConfig:
         signals=signals,
         risk=risk,
         colombia=colombia,
+        ml=ml,
         output=output,
     )
 
