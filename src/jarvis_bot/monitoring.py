@@ -129,13 +129,13 @@ class HealthCheck:
             return ServiceStatus("Alpaca", ok=False, message=f"Error de red: {exc}")
 
     def check_fred(self) -> ServiceStatus:
-        """Verifica acceso a FRED API (tasa COP/USD)."""
+        """Verifica acceso a FRED API (curva de rendimientos T10Y2Y)."""
         if not self.fred_key:
             return ServiceStatus("FRED", ok=False, message="FRED_API_KEY no configurada")
 
         url = "https://api.stlouisfed.org/fred/series/observations"
         params = {
-            "series_id": "DEXCOUS",
+            "series_id": "T10Y2Y",
             "api_key": self.fred_key,
             "file_type": "json",
             "limit": "1",
@@ -151,7 +151,7 @@ class HealthCheck:
                 return ServiceStatus(
                     "FRED",
                     ok=True,
-                    message=f"OK — último dato DEXCOUS: {last_date}",
+                    message=f"OK — último dato T10Y2Y: {last_date}",
                     latency_ms=latency,
                 )
             return ServiceStatus(

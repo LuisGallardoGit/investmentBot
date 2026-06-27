@@ -401,9 +401,7 @@ def run_pipeline(
                     )
                 )
                 # Calcular PnL ajustado por FX en COP
-                pnl_usd = fill.price * fill.quantity - (
-                    fx_risk.entry_rate(sym) * 0 if not current_usd_cop else 0
-                )
+                pnl_usd = fill.price * fill.quantity
                 trade = _trade_dict(fill, sig.value, equity)
                 trade["usd_cop_exit"] = current_usd_cop
                 if current_usd_cop and fx_risk.entry_rate(sym):

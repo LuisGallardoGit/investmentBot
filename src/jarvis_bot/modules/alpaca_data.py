@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
@@ -22,6 +23,19 @@ log = logging.getLogger(__name__)
 ALPACA_DATA_ENDPOINT = "https://data.alpaca.markets/v2"
 
 OHLCV_COLS = ["date", "open", "high", "low", "close", "volume"]
+
+# Caché local — carpeta relativa al directorio de trabajo
+CACHE_DIR = Path("data/cache")
+
+# Ventana de refresco: si el último dato del caché es más reciente que esto,
+# se considera fresco y NO se descarga nada (ahorra llamadas a la API).
+_FRESH_WINDOW: dict[str, timedelta] = {
+    "1Min":  timedelta(minutes=2),
+    "5Min":  timedelta(minutes=6),
+    "15Min": timedelta(minutes=16),
+    "1Hour": timedelta(hours=2),
+    "1Day":  timedelta(hours=20),
+}
 
 # Mapeo de timeframe legible → formato Alpaca API
 TIMEFRAME_MAP = {
@@ -69,6 +83,47 @@ class AlpacaDataIngestor:
     def is_configured(self) -> bool:
         return bool(self.api_key and self.secret_key)
 
+    # ------------------------------------------------------------------
+    # Caché local
+    # ------------------------------------------------------------------
+
+    def _cache_path(self, symbol: str, tf_api: str) -> Path:
+        return CACHE_DIR / f"{symbol}_{tf_api}.csv"
+
+    def _load_cache(self, symbol: str, tf_api: str) -> pd.DataFrame | None:
+        """Carga el caché local si existe. Retorna None si no hay caché."""
+        path = self._cache_path(symbol, tf_api)
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_csv(path)
+            df["date"] = pd.to_datetime(df["date"], utc=True)
+            return df.sort_values("date").reset_index(drop=True)
+        except Exception as exc:
+            log.warning("No se pudo leer caché %s: %s", path, exc)
+            return None
+
+    def _save_cache(self, symbol: str, tf_api: str, df: pd.DataFrame) -> None:
+        """Guarda el DataFrame en caché CSV."""
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = self._cache_path(symbol, tf_api)
+        df.to_csv(path, index=False)
+
+    def _is_fresh(self, df: pd.DataFrame, tf_api: str) -> bool:
+        """True si el último dato del caché es suficientemente reciente."""
+        if df.empty:
+            return False
+        last_date = df["date"].iloc[-1]
+        if not hasattr(last_date, "tzinfo") or last_date.tzinfo is None:
+            last_date = pd.Timestamp(last_date, tz="UTC")
+        now = datetime.now(tz=timezone.utc)
+        window = _FRESH_WINDOW.get(tf_api, timedelta(hours=2))
+        return (now - last_date.to_pydatetime()) <= window
+
+    # ------------------------------------------------------------------
+    # Descarga con caché incremental
+    # ------------------------------------------------------------------
+
     def fetch_historical_data(
         self,
         symbols: Iterable[str],
@@ -76,13 +131,17 @@ class AlpacaDataIngestor:
         lookback_days: int | None = None,
         limit: int = 1000,
     ) -> dict[str, pd.DataFrame]:
-        """Descarga barras OHLCV para los símbolos dados.
+        """Descarga barras OHLCV para los símbolos dados, con caché incremental.
+
+        - Si el caché está fresco → lo devuelve sin tocar Alpaca.
+        - Si el caché existe pero está desactualizado → descarga solo las barras nuevas.
+        - Si no hay caché → descarga el historial completo y lo guarda.
 
         Args:
-            symbols:      Lista de tickers (ej. ["AAPL", "VOO"]).
-            timeframe:    Resolución temporal. Acepta "1h","1H","1Hour","1d","1D","1Day", etc.
-            lookback_days: Días de historia a pedir. Si None, usa el default por timeframe.
-            limit:        Máximo de barras por símbolo por request (paginación automática).
+            symbols:       Lista de tickers (ej. ["AAPL", "VOO"]).
+            timeframe:     Resolución temporal.
+            lookback_days: Días de historia para la descarga inicial.
+            limit:         Máximo de barras por request (paginación automática).
 
         Returns:
             Dict {SYMBOL: DataFrame con columnas date,open,high,low,close,volume}.
@@ -95,28 +154,62 @@ class AlpacaDataIngestor:
 
         tf_api = TIMEFRAME_MAP.get(timeframe, timeframe)
         days = lookback_days or DEFAULT_LOOKBACK.get(tf_api, 365)
-
-        start_dt = datetime.now(tz=timezone.utc) - timedelta(days=days)
-        start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
         syms = [s.upper() for s in symbols]
-        syms_str = ",".join(syms)
+        result: dict[str, pd.DataFrame] = {}
 
-        log.info(
-            "Descargando %s bars desde Alpaca (%s feed, lookback=%dd): %s",
-            tf_api,
-            self.feed,
-            days,
-            syms_str,
-        )
+        for sym in syms:
+            cached = self._load_cache(sym, tf_api)
 
-        all_bars: dict[str, list] = {s: [] for s in syms}
+            if cached is not None and self._is_fresh(cached, tf_api):
+                log.info("[%s/%s] Caché fresco — sin descarga necesaria.", sym, tf_api)
+                result[sym] = cached
+                continue
+
+            if cached is not None and not cached.empty:
+                # Incremental: solo descarga desde el último dato
+                last_ts = cached["date"].iloc[-1]
+                if hasattr(last_ts, "to_pydatetime"):
+                    last_ts = last_ts.to_pydatetime()
+                start_dt = last_ts + timedelta(seconds=1)
+                log.info("[%s/%s] Caché parcial — descargando desde %s.", sym, tf_api, start_dt.date())
+            else:
+                # Descarga completa
+                start_dt = datetime.now(tz=timezone.utc) - timedelta(days=days)
+                log.info("[%s/%s] Sin caché — descarga completa (%dd).", sym, tf_api, days)
+
+            new_df = self._fetch_symbol(sym, tf_api, start_dt, limit)
+
+            if cached is not None and not cached.empty and not new_df.empty:
+                combined = pd.concat([cached, new_df], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["date"], keep="last")
+                combined = combined.sort_values("date").reset_index(drop=True)
+            elif not new_df.empty:
+                combined = new_df
+            else:
+                combined = cached if cached is not None else new_df
+
+            if not combined.empty:
+                self._save_cache(sym, tf_api, combined)
+
+            result[sym] = combined
+
+        return result
+
+    def _fetch_symbol(
+        self,
+        symbol: str,
+        tf_api: str,
+        start_dt: datetime,
+        limit: int = 1000,
+    ) -> pd.DataFrame:
+        """Descarga barras para UN símbolo desde start_dt hasta ahora."""
+        start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        all_bars: list = []
         next_token: str | None = None
 
-        # Paginación automática — Alpaca devuelve next_page_token cuando hay más datos
         while True:
             params: dict = {
-                "symbols": syms_str,
+                "symbols": symbol,
                 "timeframe": tf_api,
                 "start": start_str,
                 "limit": limit,
@@ -132,22 +225,18 @@ class AlpacaDataIngestor:
                 params=params,
                 timeout=20,
             )
-
             if resp.status_code != 200:
                 raise RuntimeError(
                     f"Alpaca Data API error {resp.status_code}: {resp.text[:300]}"
                 )
 
             body = resp.json()
-            bars_page = body.get("bars", {})
-            for sym in syms:
-                all_bars[sym].extend(bars_page.get(sym, []))
-
+            all_bars.extend(body.get("bars", {}).get(symbol, []))
             next_token = body.get("next_page_token")
             if not next_token:
                 break
 
-        return {sym: self._to_dataframe(sym, all_bars[sym]) for sym in syms}
+        return self._to_dataframe(symbol, all_bars)
 
     def fetch_multi_timeframe(
         self,
@@ -155,7 +244,7 @@ class AlpacaDataIngestor:
         timeframes: list[str] | None = None,
         lookback_days: int | None = None,
     ) -> dict[str, dict[str, pd.DataFrame]]:
-        """Descarga múltiples resoluciones temporales de una vez.
+        """Descarga múltiples resoluciones temporales con caché incremental por timeframe.
 
         Returns:
             Dict anidado {timeframe: {SYMBOL: DataFrame}}.
