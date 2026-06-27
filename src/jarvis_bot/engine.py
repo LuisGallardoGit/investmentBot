@@ -30,6 +30,7 @@ import pandas as pd
 from .brokers import Broker, Order, OrderSide, PaperBroker
 from .config import AppConfig
 from .indicators import enrich
+from .modules.alerts import AlertManager
 from .modules.alpaca_data import AlpacaDataIngestor
 from .modules.alpaca_executor import AlpacaExecutor, BracketConfig
 from .modules.fx_risk import FXRiskManager
@@ -38,6 +39,7 @@ from .modules.market_hours import is_market_open, market_status
 from .modules.position_reconciler import PositionReconciler
 from .modules.risk_manager import RiskManager
 from .modules.sentiment import SentimentAnalyzer
+from .monitoring import HealthCheck, PortfolioMonitor
 from .strategies import get_strategy
 from .strategies.base import Signal
 
@@ -156,23 +158,39 @@ def _portfolio_value(broker: Broker, prices: dict[str, float]) -> tuple[float, f
     return broker.cash(), positions_value
 
 
-def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult:
+def run_pipeline(
+    cfg: AppConfig,
+    broker: Broker | None = None,
+    alerts: AlertManager | None = None,
+) -> PipelineResult:
     if not cfg.is_paper():
         raise RuntimeError("run_pipeline solo se ejecuta en modo paper.")
 
+    alerts = alerts or AlertManager()
+
+    # -- Health check al inicio (Fase 5) --
+    health = HealthCheck()
+    health_report = health.run_all()
+    if not health_report.all_ok:
+        log.warning("Health check con fallos:\n%s", health_report.summary())
+
     # -- Guard de horario de mercado (Colombia context) --
-    if cfg.colombia.check_market_hours and not is_market_open():
-        status = market_status()
+    mkt_status = market_status()
+    if cfg.colombia.check_market_hours and not mkt_status["is_open"]:
         log.warning(
             "Mercado cerrado (sesión: '%s'). "
             "Hora ET: %s / Bogotá: %s. "
             "Próxima apertura: %s (%s Bogotá). "
             "El pipeline continuará en modo histórico sin enviar órdenes.",
-            status["session"],
-            status["et_time"],
-            status["bogota_time"],
-            status["next_open_et"],
-            status["next_open_bogota"],
+            mkt_status["session"],
+            mkt_status["et_time"],
+            mkt_status["bogota_time"],
+            mkt_status["next_open_et"],
+            mkt_status["next_open_bogota"],
+        )
+        alerts.market_closed(
+            session=mkt_status["session"],
+            next_open_bogota=mkt_status["next_open_bogota"],
         )
 
     broker = broker or PaperBroker(starting_cash=cfg.risk.initial_capital)
@@ -219,6 +237,11 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
         rsi_oversold=cfg.signals.rsi_oversold,
     )
     log.info("Estrategia activa: %s", strategy.name)
+    alerts.pipeline_start(
+        symbols=list(cfg.data.symbols),
+        strategy=strategy.name,
+        equity=cfg.risk.initial_capital,
+    )
 
     log.info(
         "Obteniendo datos %s (lookback=%dd, feed=%s) desde Alpaca...",
@@ -264,6 +287,7 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
     snapshots: list[PortfolioSnapshot] = []
     trades: list[dict] = []
     equity_curve: list[float] = []
+    _drawdown_alert_sent = False  # evitar spam de alertas de drawdown
 
     indexed = {sym: df.set_index("date") for sym, df in enriched.items() if not df.empty}
 
@@ -282,6 +306,13 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
         )
         equity_curve.append(equity)
         drawdown_locked = risk.drawdown_breach(equity_curve)
+        if drawdown_locked and not _drawdown_alert_sent:
+            peak = max(equity_curve)
+            current_dd = (peak - equity) / peak if peak > 0 else 0.0
+            alerts.drawdown_warning(current_dd, cfg.risk.max_drawdown_limit, equity)
+            _drawdown_alert_sent = True
+        elif not drawdown_locked:
+            _drawdown_alert_sent = False  # resetear si sale del drawdown
 
         # Sentimiento, macro y FX solo en la última barra (evita agotar API limits)
         is_latest_bar = (i == len(common_dates) - 1)
@@ -296,6 +327,11 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
                 change_pct = macro_full.usd_cop_30d_change_pct or 0.0
                 fx_state = fx_risk.evaluate(current_usd_cop, change_pct)
                 log.info("FX Colombia: %s", fx_state)
+                # Alertas FX según nivel de riesgo
+                if fx_state.risk_level == "high":
+                    alerts.fx_risk_high(change_pct, cfg.colombia.fx_vol_block_pct, current_usd_cop)
+                elif fx_state.risk_level == "elevated":
+                    alerts.fx_risk_elevated(change_pct, cfg.colombia.fx_vol_caution_pct, current_usd_cop)
         else:
             global_sentiment = 0.5
             macro_state = "normal"
@@ -339,6 +375,7 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
                 trade = _trade_dict(fill, sig.value, equity)
                 trade["usd_cop_entry"] = current_usd_cop
                 trades.append(trade)
+                alerts.trade(sym, "BUY", qty, fill.price, equity, signal=sig.value, usd_cop=current_usd_cop)
 
                 # Ejecución en Broker Real (Alpaca) solo en la última barra y si mercado abierto
                 if is_latest_bar and cfg.is_paper() and is_market_open():
@@ -380,6 +417,7 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
                     trade["fx_impact_cop"] = round(pnl_adj.fx_impact_cop, 0)
                 fx_risk.record_exit(sym)
                 trades.append(trade)
+                alerts.trade(sym, "SELL", fill.quantity, fill.price, equity, signal=sig.value, usd_cop=current_usd_cop)
 
                 # Ejecución en Broker Real (Alpaca) solo en la última barra y si mercado abierto
                 if is_latest_bar and cfg.is_paper() and is_market_open():
@@ -408,6 +446,17 @@ def run_pipeline(cfg: AppConfig, broker: Broker | None = None) -> PipelineResult
     # Reconciliación final: verifica que el estado local coincide con Alpaca
     if alpaca_executor.is_configured():
         reconciler.reconcile(broker.positions())
+
+    # Monitoring: métricas finales + daily summary alert (Fase 5)
+    monitor = PortfolioMonitor(
+        snapshots=snapshots,
+        initial_equity=cfg.risk.initial_capital,
+        n_trades=len(trades),
+        open_positions=broker.positions(),
+        usd_cop=current_usd_cop,
+    )
+    metrics = monitor.compute()
+    alerts.daily_summary(**metrics.as_alert_kwargs())
 
     log.info(
         "Pipeline completo: %d snapshots, %d trades, equity=%.2f USD%s",
