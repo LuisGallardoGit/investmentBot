@@ -1,0 +1,42 @@
+[
+  {
+    "term": "DCA (Dollar Cost Averaging)",
+    "definition": "Estrategia de inversión que consiste en invertir una cantidad fija de dinero en un activo a intervalos regulares, independientemente de su precio."
+  },
+  {
+    "term": "RSI (Relative Strength Index)",
+    "definition": "Indicador de impulso que mide la magnitud de los cambios recientes en los precios para evaluar condiciones de sobrecompra o sobreventa."
+  },
+  {
+    "term": "ETF (Exchange Traded Fund)",
+    "definition": "Fondo de inversión cuya principal característica es que se negocia en mercados de valores secundarios, como si fuera una acción."
+  },
+  {
+    "term": "Maximum Drawdown (MDD)",
+    "definition": "La mayor caída observada desde un pico hasta un valle en una cartera, antes de que se alcance un nuevo pico. Mide el riesgo de pérdida histórica."
+  },
+  {
+    "term": "Sharpe Ratio",
+    "definition": "Métrica que mide el rendimiento de una inversión en relación con el riesgo asumido. Se calcula restando la tasa libre de riesgo del rendimiento y dividiendo por la volatilidad."
+  },
+  {
+    "term": "Monte Carlo Simulation",
+    "definition": "Técnica matemática que predice resultados posibles mediante la simulación de miles de escenarios con variables aleatorias."
+  },
+  {
+    "term": "Sentiment Analysis",
+    "definition": "Uso de procesamiento de lenguaje natural (NLP) para identificar el tono emocional (positivo, negativo, neutro) detrás de noticias o datos de mercado."
+  },
+  {
+    "term": "ATR (Average True Range)",
+    "definition": "Indicador que mide la volatilidad del mercado descomponiendo el rango completo del precio de un activo para un período determinado."
+  },
+  {
+    "term": "Risk Appetite",
+    "definition": "El nivel de riesgo que un inversor o sistema está dispuesto a aceptar en la búsqueda de sus objetivos financieros."
+  },
+  {
+    "term": "Supply Zone",
+    "definition": "Área de precios donde la oferta supera la demanda, provocando frecuentemente una resistencia al avance del precio."
+  }
+]

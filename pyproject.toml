@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-trading-bot"
+version = "0.1.0"
+description = "Paper trading bot con pipeline reproducible y modo simulacion por defecto."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Luis Gallardo" }]
+license = { text = "Proprietary" }
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "python-dotenv>=1.0",
+  "pyyaml>=6.0",
+  "requests>=2.31",
+  "tabulate>=0.9",
+  "alpaca-py>=0.13",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+  "pytest-cov>=4.1",
+]
+scripts = [
+  "yfinance>=0.2",
+]
+
+[project.scripts]
+jarvis-bot = "jarvis_bot.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["jarvis_bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+pythonpath = ["src"]

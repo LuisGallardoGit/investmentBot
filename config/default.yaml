@@ -1,0 +1,30 @@
+trading_mode: paper
+log_level: INFO
+seed: 42
+
+data:
+  fixtures_dir: data/fixtures
+  symbols:
+    - AAPL
+    - VOO
+    - QQQ
+
+risk:
+  initial_capital: 10000.0
+  risk_per_trade: 0.01        # 1% del equity por trade
+  stop_loss_pct: 0.04         # 4% stop loss para sizing Kelly-lite
+  take_profit_pct: 0.10       # 10% take profit objetivo
+  max_drawdown_limit: 0.15    # circuit breaker: para nuevas entradas si DD >= 15%
+  max_position_pct: 0.25      # max 25% del equity en un solo símbolo
+
+signals:
+  fast_ma: 9                  # EMA rápida (periodos)
+  slow_ma: 21                 # EMA lenta (periodos)
+  rsi_period: 14              # periodos para cálculo RSI
+  rsi_overbought: 70.0        # RSI por encima = sobrecomprado (filtro SELL)
+  rsi_oversold: 30.0          # RSI por debajo = sobrevendido (refuerzo BUY)
+
+output:
+  state_path: data/portfolio_state.csv
+  history_path: data/history.csv
+  report_path: logs/report.md

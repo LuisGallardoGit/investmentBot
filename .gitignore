@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+src/logs/
+
+# Runtime data
+data/history.csv
+data/portfolio_state.csv
+logs/last_run_tmp.md
+
+# macOS
+.DS_Store
+._*
