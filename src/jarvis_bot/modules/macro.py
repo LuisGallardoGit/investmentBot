@@ -1,22 +1,28 @@
-"""Análisis macroeconómico usando la API de FRED.
+"""Análisis macroeconómico usando la API de FRED + open.er-api.com para USD/COP.
 
-Series usadas:
+Series FRED:
   T10Y2Y   — Yield curve spread (10Y - 2Y Treasury). Negativo = curva invertida = riesgo alto.
-  DEXCOUS  — Tipo de cambio USD/COP (dólares por peso colombiano × 1000).
-             FRED lo reporta como COP por USD (ej. 4200 = 1 USD = 4200 COP).
 
-Requiere env: FRED_API_KEY
+USD/COP:
+  open.er-api.com — Tasa diaria gratuita, sin API key. FRED no tiene esta serie.
+  Historial local: data/usdcop_history.csv (generado por monitor_usdcop.py)
+
+Requiere env: FRED_API_KEY (solo para T10Y2Y)
 """
 
 from __future__ import annotations
 
+import csv
 import logging
+from pathlib import Path
 
 import requests
 
 log = logging.getLogger(__name__)
 
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+OPEN_ER_URL = "https://open.er-api.com/v6/latest/USD"
+USDCOP_HISTORY_PATH = Path("data/usdcop_history.csv")
 
 
 def _fred_latest(series_id: str, api_key: str, timeout: int = 10) -> float | None:
@@ -72,7 +78,7 @@ class MacroAnalyzer:
 
     Indicadores:
     - Yield curve (T10Y2Y): proxy de riesgo de recesión global.
-    - USD/COP (DEXCOUS): riesgo cambiario para inversores colombianos.
+    - USD/COP (open.er-api.com): riesgo cambiario para inversores colombianos.
       Una devaluación fuerte del peso amplifica ganancias en USD; una
       revaluación las reduce. Se reporta como factor informativo.
     """
@@ -133,43 +139,45 @@ class MacroAnalyzer:
     # ------------------------------------------------------------------
 
     def _fetch_usd_cop(self) -> tuple[float | None, float | None]:
-        """Obtiene el tipo de cambio USD/COP y su variación mensual.
+        """Obtiene el tipo de cambio USD/COP y su variación ~30 días.
 
-        FRED serie DEXCOUS: pesos colombianos por 1 USD.
+        Fuente: open.er-api.com (gratuito, sin API key, actualización diaria).
+        La variación mensual se estima desde el historial local usdcop_history.csv.
         Retorna (usd_cop_actual, variacion_30d_pct) o (None, None) si hay error.
         """
-        url = (
-            f"{FRED_BASE}?series_id=DEXCOUS"
-            f"&api_key={self.api_key}&file_type=json&sort_order=desc&limit=30"
-        )
         try:
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(OPEN_ER_URL, timeout=10)
             resp.raise_for_status()
-            observations = [
-                obs for obs in resp.json().get("observations", [])
-                if obs.get("value", ".") != "."
-            ]
-            if not observations:
-                log.warning("Sin datos USD/COP de FRED.")
-                return None, None
-
-            latest = float(observations[0]["value"])
-            log.info("FRED USD/COP (DEXCOUS): %.2f COP/USD", latest)
-
-            change_pct = None
-            if len(observations) >= 20:
-                oldest = float(observations[-1]["value"])
-                if oldest > 0:
-                    change_pct = round((latest - oldest) / oldest * 100, 2)
-                    direction = "devaluación" if change_pct > 0 else "revaluación"
-                    log.info(
-                        "USD/COP variación ~30d: %+.2f%% (%s del peso colombiano)",
-                        change_pct,
-                        direction,
-                    )
-
-            return latest, change_pct
-
+            data = resp.json()
+            latest = float(data["rates"]["COP"])
+            log.info("USD/COP (open.er-api.com): %.2f COP/USD", latest)
         except Exception as exc:
-            log.error("Error consultando FRED USD/COP: %s", exc)
+            log.warning("No se pudo obtener USD/COP: %s", exc)
             return None, None
+
+        # Variación 30d desde historial local (generado por monitor_usdcop.py)
+        change_pct = None
+        try:
+            if USDCOP_HISTORY_PATH.exists():
+                rows = []
+                with USDCOP_HISTORY_PATH.open("r") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        try:
+                            rows.append(float(row.get("usd_cop") or row.get("rate") or 0))
+                        except (ValueError, TypeError):
+                            pass
+                if len(rows) >= 2:
+                    oldest = rows[0]  # primera entrada del CSV (más antigua)
+                    if oldest > 0:
+                        change_pct = round((latest - oldest) / oldest * 100, 2)
+                        direction = "devaluación" if change_pct > 0 else "revaluación"
+                        log.info(
+                            "USD/COP variación histórica: %+.2f%% (%s del peso colombiano)",
+                            change_pct,
+                            direction,
+                        )
+        except Exception as exc:
+            log.debug("No se pudo calcular variación 30d USD/COP: %s", exc)
+
+        return latest, change_pct

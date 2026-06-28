@@ -124,6 +124,7 @@ class PositionReconciler:
         self,
         local_positions: dict[str, float],
         sync_from_alpaca: bool = False,
+        warn_local_only: bool = False,
     ) -> ReconciliationReport:
         """Compara posiciones locales con Alpaca y genera un reporte.
 
@@ -134,6 +135,11 @@ class PositionReconciler:
         sync_from_alpaca : bool
             Si True, retorna el estado correcto de Alpaca para que el caller
             actualice el estado local. No modifica nada directamente.
+        warn_local_only : bool
+            Si False (default), las discrepancias LOCAL_ONLY se loguean en DEBUG
+            en vez de WARNING. Esto es correcto en paper trading donde el historial
+            acumula posiciones paper que Alpaca nunca ejecutó. Solo REMOTE_ONLY
+            es una condición realmente peligrosa (posición real no rastreada).
 
         Retorna
         -------
@@ -186,8 +192,38 @@ class PositionReconciler:
         )
 
         # Log del reporte
+        # LOCAL_ONLY: paper simulation tiene posición, Alpaca no → esperado en backtest
+        # REMOTE_ONLY: Alpaca tiene posición real que no rastreamos → siempre WARNING
         if report.has_discrepancies:
-            log.warning(report.summary())
+            remote_only = [
+                d for d in report.discrepancies
+                if d.discrepancy_type == DiscrepancyType.REMOTE_ONLY
+            ]
+            other_issues = [
+                d for d in report.discrepancies
+                if d.discrepancy_type not in (DiscrepancyType.MATCH, DiscrepancyType.REMOTE_ONLY)
+            ]
+            if remote_only:
+                log.warning(
+                    "Reconciliación: posición(es) en Alpaca no rastreadas localmente — "
+                    "revisar manualmente: %s",
+                    ", ".join(str(d) for d in remote_only),
+                )
+            if other_issues and warn_local_only:
+                log.warning(report.summary())
+            elif other_issues:
+                log.debug(
+                    "Reconciliación paper: %d discrepancia(s) LOCAL_ONLY esperadas "
+                    "(posiciones simuladas no enviadas a Alpaca): %s",
+                    len(other_issues),
+                    ", ".join(d.symbol for d in other_issues),
+                )
+            if not remote_only and not (other_issues and warn_local_only):
+                log.info(
+                    "Reconciliación: %d OK, %d LOCAL_ONLY paper (normal en backtest).",
+                    report.n_matches,
+                    len(other_issues),
+                )
         else:
             log.info(
                 "Reconciliación OK: %d posiciones coinciden con Alpaca.",

@@ -297,6 +297,8 @@ def run_pipeline(
     snapshots: list[PortfolioSnapshot] = []
     trades: list[dict] = []
     equity_curve: list[float] = []
+    # Rastreo de precios de entrada para calcular PnL real al cerrar
+    entry_prices: dict[str, float] = {}
     _drawdown_alert_sent = False  # evitar spam de alertas de drawdown
 
     indexed = {sym: df.set_index("date") for sym, df in enriched.items() if not df.empty}
@@ -396,6 +398,7 @@ def run_pipeline(
                 if current_usd_cop:
                     fx_risk.record_entry(sym, current_usd_cop)
 
+                entry_prices[sym] = fill.price  # guardar para calcular PnL al vender
                 trade = _trade_dict(fill, sig.value, equity)
                 trade["usd_cop_entry"] = current_usd_cop
                 trades.append(trade)
@@ -424,19 +427,24 @@ def run_pipeline(
                         reference_price=price,
                     )
                 )
-                # Calcular PnL ajustado por FX en COP
-                pnl_usd = fill.price * fill.quantity
+                # PnL real = (precio_salida - precio_entrada) × qty
+                entry_px = entry_prices.pop(sym, fill.price)
+                pnl_usd = (fill.price - entry_px) * fill.quantity
                 trade = _trade_dict(fill, sig.value, equity)
                 trade["usd_cop_exit"] = current_usd_cop
+                trade["pnl_usd"] = round(pnl_usd, 2)
                 if current_usd_cop and fx_risk.entry_rate(sym):
                     pnl_adj = fx_risk.adjusted_pnl(
                         sym,
-                        pnl_usd=fill.price * fill.quantity,  # bruto, proxy
+                        pnl_usd=pnl_usd,
                         position_usd=fill.price * fill.quantity,
                         current_usd_cop=current_usd_cop,
                     )
                     trade["pnl_cop_approx"] = round(pnl_adj.pnl_cop, 0)
                     trade["fx_impact_cop"] = round(pnl_adj.fx_impact_cop, 0)
+                elif current_usd_cop:
+                    # Sin FX entry rate, estimar PnL COP directamente
+                    trade["pnl_cop_approx"] = round(pnl_usd * current_usd_cop, 0)
                 fx_risk.record_exit(sym)
                 trades.append(trade)
                 alerts.trade(sym, "SELL", fill.quantity, fill.price, equity, signal=sig.value, usd_cop=current_usd_cop)
@@ -506,6 +514,8 @@ def _trade_dict(fill, signal: str, equity_pre: float) -> dict:
         "signal": signal,
         "equity_pre_trade": equity_pre,
         "commission": fill.commission,
+        # PnL real en USD (Fase 3+)
+        "pnl_usd": None,
         # FX (Fase 3)
         "usd_cop_entry": None,
         "usd_cop_exit": None,
